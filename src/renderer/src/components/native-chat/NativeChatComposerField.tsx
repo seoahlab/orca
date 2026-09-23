@@ -16,6 +16,8 @@ import type {
 } from '../../../../shared/native-chat-session-options'
 import type { NativeChatOptionPickerRequest } from './native-chat-composer-types'
 import { NativeChatImageAttachmentPreview } from './NativeChatImageAttachmentPreview'
+import type { NativeChatComposerGoalMode } from './use-native-chat-composer-submit'
+import { translate } from '@/i18n/i18n'
 
 export type NativeChatComposerFieldProps = {
   /** Pane identity published to the drop pipeline so a native file drop lands
@@ -56,6 +58,7 @@ export type NativeChatComposerFieldProps = {
   sessionOptionsSurface: SessionOptionsSurface | null
   sessionOptionsSnapshot: SessionOptionDescriptor[]
   sessionOptionsPickerRequest?: NativeChatOptionPickerRequest | null
+  goalMode?: NativeChatComposerGoalMode
 }
 
 export type NativeChatComposerImageAttachment = {
@@ -127,7 +130,8 @@ export function NativeChatComposerField({
   onStop,
   sessionOptionsSurface,
   sessionOptionsSnapshot,
-  sessionOptionsPickerRequest
+  sessionOptionsPickerRequest,
+  goalMode
 }: NativeChatComposerFieldProps): React.JSX.Element {
   // Value the IME started from, and whether a programmatic clear was dropped on top of it.
   const compositionBaseRef = useRef('')
@@ -166,7 +170,7 @@ export function NativeChatComposerField({
       {/* Extra bottom padding keeps the input box off the window rim. */}
       <div className="px-3 pt-2 pb-4 sm:px-4">
         <div className="relative mx-auto w-full max-w-4xl">
-          {autocomplete.mode === 'slash' || autocomplete.mode === 'skill' ? (
+          {autocomplete.mode === 'slash' ? (
             <NativeChatPickerMenu
               autocomplete={autocomplete}
               activeIndex={activeSuggestion}
@@ -192,7 +196,15 @@ export function NativeChatComposerField({
               // no focus/click border flash. The box is a container, not a
               // focus target.
               'rounded-lg border border-border p-1.5 shadow-xs',
-              'bg-muted/50 dark:bg-input/40'
+              'bg-muted/50 dark:bg-input/40',
+              // Why (#10481): the native caret blink invalidates paint up to the
+              // nearest containment boundary; without this the whole transcript
+              // re-rasterizes twice a second. Pickers are siblings and every menu
+              // and tooltip in here is a Radix portal, so nothing floating clips.
+              // Tightest descendant is the attachment remove button, which
+              // overhangs its thumbnail by 6px and clears this box's padding by
+              // 4px — keep that slack if the padding below ever shrinks.
+              '[contain:paint]'
             )}
           >
             {imageAttachments.length > 0 ? (
@@ -239,19 +251,21 @@ export function NativeChatComposerField({
               }}
               onPasteCapture={onPaste}
               onSelect={onTextareaSelect}
-              aria-expanded={autocomplete.mode === 'slash' || autocomplete.mode === 'skill'}
-              aria-controls={
-                autocomplete.mode === 'slash' || autocomplete.mode === 'skill'
-                  ? pickerListboxId
-                  : undefined
-              }
+              aria-expanded={autocomplete.mode === 'slash'}
+              aria-controls={autocomplete.mode === 'slash' ? pickerListboxId : undefined}
               aria-activedescendant={
-                (autocomplete.mode === 'slash' || autocomplete.mode === 'skill') &&
-                autocomplete.items.length > 0
+                autocomplete.mode === 'slash' && autocomplete.items.length > 0
                   ? `${pickerListboxId}-option-${Math.min(activeSuggestion, autocomplete.items.length - 1)}`
                   : undefined
               }
-              placeholder={nativeChatComposerPlaceholder(hasPty, canSend)}
+              placeholder={
+                goalMode?.active
+                  ? translate(
+                      'components.native-chat.goal.placeholder',
+                      'Describe your goal, define measurable outcomes for best results'
+                    )
+                  : nativeChatComposerPlaceholder(hasPty, canSend)
+              }
               // Why: coarse-pointer min-height follows the app's touch target convention.
               // Editable content grows naturally; the 8lh cap (plus
               // py-1) turns further growth into internal scrolling, and scrollbar-sleek
@@ -280,6 +294,7 @@ export function NativeChatComposerField({
                 sessionOptionsSurface={sessionOptionsSurface}
                 sessionOptionsSnapshot={sessionOptionsSnapshot}
                 sessionOptionsPickerRequest={sessionOptionsPickerRequest}
+                onExitGoalMode={goalMode?.active ? goalMode.exit : undefined}
               />
             </div>
           </div>

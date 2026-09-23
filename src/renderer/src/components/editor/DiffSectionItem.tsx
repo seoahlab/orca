@@ -115,8 +115,8 @@ export function DiffSectionItem({
     comments: inlineComments ?? (worktreeId ? diffComments : []),
     commentableLineNumbers: getCommentableLineNumbers?.(section),
     addButtonLabel: addLineCommentLabel,
-    enableAddReviewNoteShortcut: true,
-    isAddCommentDraftOpen: popover !== null,
+    pendingCommentTarget: popover,
+    addNoteShortcutEnabled: hasLineCommentAction,
     onAddCommentClick: ({ lineNumber, startLine, top }) =>
       setPopover({
         lineNumber,

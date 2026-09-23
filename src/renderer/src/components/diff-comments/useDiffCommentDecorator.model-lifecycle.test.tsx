@@ -1,7 +1,10 @@
 // @vitest-environment happy-dom
 import { renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Selection } from 'monaco-editor'
 import type { editor as MonacoEditor } from 'monaco-editor'
+import { createFakeDiffCommentEditor } from './diff-comment-editor-test-fixture'
+import type { DiffCommentLineTarget } from './diff-comment-line-range'
 
 const storeFixture = vi.hoisted(() => ({
   activeGroupIdByWorktree: {},
@@ -23,6 +26,13 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+/** No zones exist in this suite, so the hook never reaches these. */
+const viewZoneAccessor: MonacoEditor.IViewZoneChangeAccessor = {
+  addZone: () => '',
+  removeZone: () => undefined,
+  layoutZone: () => undefined
+}
+
 describe('useDiffCommentDecorator model lifecycle', () => {
   it('rebuilds model-scoped resources when a retained editor swaps models', () => {
     const editorDomNode = document.createElement('div')
@@ -30,13 +40,18 @@ describe('useDiffCommentDecorator model lifecycle', () => {
     const disposeMouseMove = vi.fn()
     const disposeMouseLeave = vi.fn()
     const disposeScroll = vi.fn()
+    // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: a partial stand-in for Monaco's ICodeEditor; useDiffCommentDecorator calls only the members defined here, and a real editor needs a laid-out DOM this suite does not build.
     const editor = {
       getDomNode: () => editorDomNode,
+      getContainerDomNode: () => editorDomNode,
       getOption: () => 19,
+      createDecorationsCollection: () => ({ set: () => {}, clear: () => {} }),
       onMouseMove: () => ({ dispose: disposeMouseMove }),
       onMouseLeave: () => ({ dispose: disposeMouseLeave }),
       onDidScrollChange: () => ({ dispose: disposeScroll }),
-      changeViewZones: (callback: (accessor: object) => void) => callback({})
+      onDidDispose: () => ({ dispose: () => {} }),
+      changeViewZones: (callback: (accessor: MonacoEditor.IViewZoneChangeAccessor) => void) =>
+        callback(viewZoneAccessor)
     } as unknown as MonacoEditor.ICodeEditor
     const hook = renderHook(
       ({ monacoModelIdentity }) =>
@@ -64,39 +79,26 @@ describe('useDiffCommentDecorator model lifecycle', () => {
   })
 
   it('opens a diff note from the configured shortcut and preserves an open draft', () => {
-    const editorDomNode = document.createElement('div')
+    const { editor, domNode: editorDomNode } = createFakeDiffCommentEditor({ lineCount: 8 })
     const input = document.createElement('textarea')
     editorDomNode.appendChild(input)
-    document.body.appendChild(editorDomNode)
     let positionLine = 4
-    const editor = {
-      getDomNode: () => editorDomNode,
-      getModel: () => ({ getLineCount: () => 8 }),
-      getOption: () => 20,
-      getPosition: () => ({ lineNumber: positionLine, column: 1 }),
-      getScrollTop: () => 10,
-      getSelection: () => null,
-      getTopForLineNumber: (lineNumber: number) => lineNumber * 20,
-      onMouseMove: () => ({ dispose: vi.fn() }),
-      onMouseLeave: () => ({ dispose: vi.fn() }),
-      onDidScrollChange: () => ({ dispose: vi.fn() }),
-      changeViewZones: (callback: (accessor: object) => void) => callback({})
-    } as unknown as MonacoEditor.ICodeEditor
+    editor.getSelection = () => new Selection(positionLine, 1, positionLine, 1)
     const onAddCommentClick = vi.fn()
-    const hook = renderHook(
-      ({ isAddCommentDraftOpen }) =>
+    const hook = renderHook<void, { pendingCommentTarget: DiffCommentLineTarget | null }>(
+      ({ pendingCommentTarget }) =>
         useDiffCommentDecorator({
           editor,
           filePath: 'notes.ts',
           worktreeId: 'worktree-1',
           comments: [],
           commentableLineNumbers: [4, 5],
-          enableAddReviewNoteShortcut: true,
-          isAddCommentDraftOpen,
+          addNoteShortcutEnabled: true,
+          pendingCommentTarget,
           onAddCommentClick,
           onDeleteComment: vi.fn()
         }),
-      { initialProps: { isAddCommentDraftOpen: false } }
+      { initialProps: { pendingCommentTarget: null } }
     )
     const event = new KeyboardEvent('keydown', {
       key: 'l',
@@ -112,10 +114,10 @@ describe('useDiffCommentDecorator model lifecycle', () => {
     expect(onAddCommentClick).toHaveBeenCalledWith({
       lineNumber: 4,
       startLine: undefined,
-      top: 90
+      top: 80
     })
 
-    hook.rerender({ isAddCommentDraftOpen: true })
+    hook.rerender({ pendingCommentTarget: { lineNumber: 4 } })
     positionLine = 5
     const openDraftEvent = new KeyboardEvent('keydown', {
       key: 'l',

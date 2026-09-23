@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
-import type { editor as monacoEditor, IDisposable } from 'monaco-editor'
+import type { editor as monacoEditor } from 'monaco-editor'
 import { createRoot, type Root } from 'react-dom/client'
 import { getCommentBodyLayoutLineCount } from '@/lib/comment-body-line-count'
 import { useAppStore } from '@/store'
-import { installDiffCommentAddButtonOverlay } from './diff-comment-add-button-overlay'
+import {
+  installDiffCommentAddButtonOverlay,
+  type DiffCommentAddButtonOverlayHandle
+} from './diff-comment-add-button-overlay'
+import type { DiffCommentLineRange, DiffCommentLineTarget } from './diff-comment-line-range'
+import { installDiffCommentAddNoteShortcut } from './diff-comment-add-note-shortcut'
 import { installDiffCommentZoneMouseDownStopper } from './diff-comment-zone-mouse-events'
 import { getRenderSignature, renderDiffCommentZoneCard } from './diff-comment-zone-card'
-import { installDiffCommentReviewNoteShortcut } from './diff-comment-review-note-shortcut'
 import type { DecoratedDiffComment } from './decorated-diff-comment'
 import {
   resizeDiffCommentZone,
@@ -25,8 +29,12 @@ type DecoratorArgs = {
   comments: readonly DecoratedDiffComment[]
   commentableLineNumbers?: readonly number[]
   addButtonLabel?: string
-  enableAddReviewNoteShortcut?: boolean
-  isAddCommentDraftOpen?: boolean
+  // The open composer's anchor — pass the composer state itself. Its lines stay lit while the
+  // note is written, and because the composer owns the range the band cannot outlive it.
+  pendingCommentTarget?: DiffCommentLineTarget | null
+  // Bind the Add Review Note chord to this editor. Off for the markdown editor, which already
+  // binds it through its own input bindings.
+  addNoteShortcutEnabled?: boolean
   onAddCommentClick: (args: { lineNumber: number; startLine?: number; top: number }) => void
   onDeleteComment: (commentId: string) => void
   // Present only on surfaces that allow editing (local diffs); PR review notes are remote and can't be edited here.
@@ -45,8 +53,8 @@ export function useDiffCommentDecorator({
   comments,
   commentableLineNumbers,
   addButtonLabel = 'Add note for the AI',
-  enableAddReviewNoteShortcut = false,
-  isAddCommentDraftOpen = false,
+  pendingCommentTarget = null,
+  addNoteShortcutEnabled = false,
   onAddCommentClick,
   onDeleteComment,
   onUpdateComment,
@@ -59,9 +67,16 @@ export function useDiffCommentDecorator({
     worktreeId ? (s.activeGroupIdByWorktree[worktreeId] ?? worktreeId) : worktreeId
   )
   const hoverLineRef = useRef<number | null>(null)
+  const overlayRef = useRef<DiffCommentAddButtonOverlayHandle | null>(null)
+  // Mirrored so the overlay's install effect can re-apply the live range without depending on it;
+  // the effect below owns the value, and runs in the same commit as the install.
+  const pendingCommentRangeRef = useRef<DiffCommentLineRange | null>(null)
+  const setPendingCommentRange = useCallback((range: DiffCommentLineRange | null): void => {
+    pendingCommentRangeRef.current = range
+    overlayRef.current?.setPendingRange(range)
+  }, [])
   // One React root per view zone: body updates re-render into it so Monaco's zone DOM stays put and only the card contents change.
   const zonesRef = useRef<Map<string, ZoneEntry>>(new Map())
-  const disposablesRef = useRef<IDisposable[]>([])
   // Pending scroll-to-note comment id; a ref (not state) so the request survives renders while we wait for layout.
   const pendingScrollRef = useRef<string | null>(null)
   // Stash the diff-zones effect's scrollToZone closure so the request-effect can invoke the latest version.
@@ -69,13 +84,10 @@ export function useDiffCommentDecorator({
   const scrollToZoneFrameRef = useRef<number | null>(null)
   // Stash callbacks in refs so the effect doesn't tear down + re-attach on every parent render (parent passes inline arrows) — avoids flicker.
   const onAddCommentClickRef = useRef(onAddCommentClick)
-  // Why: opening or closing a draft must update the shortcut guard without rebuilding Monaco overlays and view zones.
-  const isAddCommentDraftOpenRef = useRef(isAddCommentDraftOpen)
   const onDeleteCommentRef = useRef(onDeleteComment)
   const onUpdateCommentRef = useRef(onUpdateComment)
   const onPendingScrollConsumedRef = useRef(onPendingScrollConsumed)
   onAddCommentClickRef.current = onAddCommentClick
-  isAddCommentDraftOpenRef.current = isAddCommentDraftOpen
   onDeleteCommentRef.current = onDeleteComment
   onUpdateCommentRef.current = onUpdateComment
   onPendingScrollConsumedRef.current = onPendingScrollConsumed
@@ -102,7 +114,8 @@ export function useDiffCommentDecorator({
     [commentableLineKey]
   )
 
-  // Rebuild the add-button overlay and shortcut independently of comment zones.
+  // Add-button overlay only: it captures commentableLineSet/addButtonLabel, so it must be rebuilt when
+  // either changes. Kept apart from the zone teardown below, whose deps must mirror the zone-creating effect.
   useEffect(() => {
     if (!editor) {
       return
@@ -113,30 +126,68 @@ export function useDiffCommentDecorator({
       return
     }
 
-    const disposeAddButtonOverlay = installDiffCommentAddButtonOverlay({
+    const overlay = installDiffCommentAddButtonOverlay({
       editor,
       editorDomNode,
       addButtonLabel,
       commentableLineSet,
       hoverLineRef,
-      disposablesRef,
       onAddCommentClickRef
     })
-    const disposeAddReviewNoteShortcut = enableAddReviewNoteShortcut
-      ? installDiffCommentReviewNoteShortcut({
-          editor,
-          editorDomNode,
-          commentableLineSet,
-          isDraftOpen: () => isAddCommentDraftOpenRef.current,
-          onAddComment: (target) => onAddCommentClickRef.current(target)
-        })
-      : undefined
-
+    overlayRef.current = overlay
+    // A rebuild (model swap, widened commentable set) must not drop the open composer's band.
+    overlay.setPendingRange(pendingCommentRangeRef.current)
     return () => {
-      disposeAddReviewNoteShortcut?.()
-      disposeAddButtonOverlay()
+      overlayRef.current = null
+      overlay.dispose()
     }
-  }, [addButtonLabel, commentableLineSet, editor, enableAddReviewNoteShortcut, monacoModelIdentity])
+    // Why: the pending range is read through a ref and applied by the effect below, so opening or
+    // closing a composer must not tear down and rebuild the overlay mid-gesture.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addButtonLabel, commentableLineSet, editor, monacoModelIdentity])
+
+  // Keyed on the two line numbers, not the composer object: the composer's `top` is rewritten on
+  // every scroll frame, and none of that should reach a decoration write.
+  const pendingLineNumber = pendingCommentTarget?.lineNumber ?? null
+  const pendingStartLine = pendingCommentTarget?.startLine ?? null
+  useEffect(() => {
+    const range =
+      pendingLineNumber === null
+        ? null
+        : { startLine: pendingStartLine ?? pendingLineNumber, endLine: pendingLineNumber }
+    setPendingCommentRange(range)
+  }, [pendingLineNumber, pendingStartLine, setPendingCommentRange])
+
+  useEffect(() => {
+    if (!editor || !addNoteShortcutEnabled) {
+      return
+    }
+    return installDiffCommentAddNoteShortcut({
+      editor,
+      commentableLineSet,
+      // The composer consumes the chord itself once open (DiffCommentPopover's guard); claiming
+      // it here as well would remount the composer over the user's draft. A live gutter drag owns
+      // the band the same way, and its range isn't committed yet — opening from the stale editor
+      // selection would remount the composer the moment the press lands.
+      isComposerOpen: () =>
+        pendingCommentRangeRef.current !== null || overlayRef.current?.isDragging() === true,
+      onOpenComposer: (args) => {
+        // Claim synchronously so a second chord in the same event turn cannot open another draft
+        // before React commits the parent state update.
+        setPendingCommentRange({
+          startLine: args.startLine ?? args.lineNumber,
+          endLine: args.lineNumber
+        })
+        onAddCommentClickRef.current(args)
+      }
+    })
+  }, [
+    addNoteShortcutEnabled,
+    commentableLineSet,
+    editor,
+    monacoModelIdentity,
+    setPendingCommentRange
+  ])
 
   // Deps must stay a subset of the zone-creating effect's, or a teardown here is never followed by a rebuild.
   useEffect(() => {
