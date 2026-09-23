@@ -15,6 +15,7 @@ import SourceControl from './SourceControl'
 const MERGE_BASE = '1f3c0d9a5b6e7f8091a2b3c4d5e6f708192a3b4c'
 
 const mocks = vi.hoisted(() => {
+  const diffComments: DiffComment[] = []
   const activeRepo = {
     id: 'repo-1',
     path: '/repo',
@@ -43,7 +44,7 @@ const mocks = vi.hoisted(() => {
     isPinned: false,
     sortOrder: 0,
     lastActivityAt: 0,
-    diffComments: [] as DiffComment[]
+    diffComments
   }
   return {
     activeRepo,

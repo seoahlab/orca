@@ -26,12 +26,14 @@ vi.mock('./app-window-chrome', () => ({ shortcutPlatform: 'darwin' }))
 import { useGlobalKeybindings } from './use-global-keybindings'
 
 function renderGlobalKeybindings() {
+  // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: includes every layout field read by the shortcut hook.
   const layout = {
     activeView: 'terminal',
     activeWorktreeId: 'worktree-1',
     creationLayoutActive: false,
     workspaceChromeActive: true
   } as AppChromeLayout
+  // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: includes every floating-panel field read by the shortcut hook.
   const floatingWorkspace = {
     enabled: false,
     open: false,
